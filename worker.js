@@ -10,14 +10,6 @@
  *      pasted job description. The Gemini API key IS stored here, as a
  *      Worker secret (free tier available, no billing required), so it
  *      never has to live in the browser.
- *
- * Deploy:
- *   1. Paste this whole file as your Worker's code.
- *   2. Get a free Gemini API key at https://aistudio.google.com/apikey
- *   3. Go to Settings -> Variables and Secrets -> add a secret:
- *        Name: GEMINI_API_KEY
- *        Value: <your key from aistudio.google.com>
- *   4. Deploy. Copy the worker's URL and paste it into index.html.
  */
 
 const CORS_HEADERS = {
@@ -38,8 +30,6 @@ export default {
       if (url.pathname === "/bamboohr/applications") {
         return await proxyBambooApplications(request, url);
       }
-      // /bamboohr/files/:applicationId/:fileId  (must be checked before the
-      // more general /bamboohr/applications/ prefix match below)
       const fileMatch = url.pathname.match(/^\/bamboohr\/files\/([^/]+)\/([^/]+)$/);
       if (fileMatch) {
         return await proxyBambooFile(request, fileMatch[1], fileMatch[2]);
@@ -91,7 +81,6 @@ async function proxyBambooApplications(request, url) {
   const { domain, headers } = bambooAuthHeaders(request);
   const params = url.searchParams;
   const upstream = new URL(`https://${domain}.bamboohr.com/api/v1/applicant_tracking/applications`);
-  // Pass through whatever filters the client sent (jobId, page, applicationStatus, etc.)
   for (const [k, v] of params.entries()) {
     if (k !== "domain") upstream.searchParams.set(k, v);
   }
@@ -108,18 +97,6 @@ async function proxyBambooApplicationDetail(request, applicationId) {
   return new Response(body, { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
 }
 
-/**
- * Downloads a resume/cover-letter file attached to an application.
- *
- * BambooHR's public docs don't clearly document a dedicated ATS attachment
- * download route, so this tries the two most likely candidates in order:
- *   1. /v1/applicant_tracking/applications/{applicationId}/files/{fileId}
- *      (mirrors the pattern used for employee files)
- *   2. /v1/files/{fileId}
- *      (the general company file-repository download route)
- * If your account's file lives somewhere else, this is the place to adjust —
- * add another attempt to the `attempts` array below.
- */
 async function proxyBambooFile(request, applicationId, fileId) {
   const { domain, headers } = bambooAuthHeaders(request);
   const attempts = [
@@ -145,19 +122,9 @@ async function proxyBambooFile(request, applicationId, fileId) {
     }
     lastStatus = res.status;
   }
-  return jsonResponse({ error: `Could not download file ${fileId} for application ${applicationId} (last status ${lastStatus}). BambooHR's attachment route may differ for your account — see worker.js proxyBambooFile().` }, 502);
+  return jsonResponse({ error: `Could not download file ${fileId} for application ${applicationId} (last status ${lastStatus}). BambooHR's attachment route may differ for your account — see proxyBambooFile().` }, 502);
 }
 
-/**
- * Body: { jobDescription: string, candidates: [{ id, name, text, resumePdfBase64? }] }
- * Returns: { results: [{ id, score, rationale }] }
- *
- * Calls Google's Gemini API (free tier available, no billing required) to
- * score candidates. Candidates carrying a `resumePdfBase64` get that PDF
- * attached as inline document data so Gemini reads the actual resume, not
- * just question answers. Because attached PDFs make each request heavier,
- * batches with attachments are kept smaller than text-only batches.
- */
 async function matchCandidates(request, env) {
   if (!env.GEMINI_API_KEY) {
     return jsonResponse({ error: "GEMINI_API_KEY secret is not configured on this Worker." }, 500);
@@ -187,7 +154,7 @@ async function matchCandidates(request, env) {
   const allResults = [];
   for (const batch of batches) {
     const parts = buildGeminiParts(jobDescription, batch);
-    const model = "const model = "gemini-3.6-flash";
+    const model = "gemini-3.6-flash";
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
       {
@@ -218,7 +185,7 @@ async function matchCandidates(request, env) {
       const cleaned = text.replace(/```json|```/g, "").trim();
       parsed = JSON.parse(cleaned);
     } catch (e) {
-      continue; // skip a malformed batch rather than failing the whole scan
+      continue;
     }
 
     if (Array.isArray(parsed)) allResults.push(...parsed);
