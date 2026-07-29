@@ -155,27 +155,11 @@ async function matchCandidates(request, env) {
   for (const batch of batches) {
     const parts = buildGeminiParts(jobDescription, batch);
     const model = "gemini-3.6-flash";
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": env.GEMINI_API_KEY,
-        },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts }],
-          generationConfig: { responseMimeType: "application/json" },
-        }),
-      }
-    );
-
-    if (!res.ok) {
-      const errText = await res.text();
-      return jsonResponse({ error: `Gemini API error: ${errText}` }, 502);
+    const data = await callGeminiWithRetry(model, parts, env.GEMINI_API_KEY);
+    if (data.__error) {
+      return jsonResponse({ error: data.__error }, 502);
     }
 
-    const data = await res.json();
     const text = (data.candidates?.[0]?.content?.parts || [])
       .map((p) => p.text || "")
       .join("\n");
@@ -193,6 +177,46 @@ async function matchCandidates(request, env) {
 
   allResults.sort((a, b) => (b.score || 0) - (a.score || 0));
   return jsonResponse({ results: allResults.slice(0, 10), totalScored: allResults.length });
+}
+
+/**
+ * Calls Gemini with retries + backoff for transient errors (503 "high
+ * demand" / overloaded, and 429 rate limits) — these clear up on their own
+ * within seconds, so retrying automatically avoids failing an entire scan
+ * over a momentary hiccup on Google's free tier.
+ */
+async function callGeminiWithRetry(model, parts, apiKey, maxAttempts = 4) {
+  let lastErrorText = "";
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey,
+        },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts }],
+          generationConfig: { responseMimeType: "application/json" },
+        }),
+      }
+    );
+
+    if (res.ok) {
+      return await res.json();
+    }
+
+    lastErrorText = await res.text();
+    const isRetryable = res.status === 503 || res.status === 429;
+    if (!isRetryable || attempt === maxAttempts) {
+      return { __error: `Gemini API error (status ${res.status}): ${lastErrorText}` };
+    }
+
+    const delayMs = 1000 * Math.pow(2, attempt - 1);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return { __error: `Gemini API error after ${maxAttempts} attempts: ${lastErrorText}` };
 }
 
 function buildGeminiParts(jobDescription, batch) {
