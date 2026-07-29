@@ -187,7 +187,7 @@ async function matchCandidates(request, env) {
   const allResults = [];
   for (const batch of batches) {
     const parts = buildGeminiParts(jobDescription, batch);
-    const model = "const model = "gemini-3.6-flash";";
+    const model = "const model = "gemini-3.6-flash";
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
       {
