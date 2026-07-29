@@ -200,7 +200,7 @@
     <div class="grid2">
       <div class="field">
         <label for="workerurl">Worker URL</label>
-        <input type="text" id="workerurl" placeholder="https://bamboohr-matcher.xxx.workers.dev" />
+        <input type="text" id="workerurl" value="https://screening-tool.abalakrishnan.workers.dev" />
         <div class="hint">Your deployed Cloudflare Worker (see README)</div>
       </div>
       <div class="field">
@@ -235,8 +235,8 @@
   </div>
 
   <p class="footnote">
-    Scoring uses the applicant's answers to screening questions, cover letter/notes, source — and their resume, when one's attached (PDFs are read directly by Claude; .docx resumes are text-extracted in your browser).
-    Everything runs from your browser through your own Worker; nothing is stored server-side beyond the Worker's Anthropic key. Data flow: <code>this page → your Worker → BambooHR / Anthropic</code>.
+    Scoring uses the applicant's answers to screening questions, cover letter/notes, source — and their resume, when one's attached (PDFs are read directly by Gemini; .docx resumes are text-extracted in your browser).
+    Everything runs from your browser through your own Worker; nothing is stored server-side beyond the Worker's Gemini key. Data flow: <code>this page → your Worker → BambooHR / Gemini</code>.
   </p>
 
 </div>

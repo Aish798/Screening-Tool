@@ -1,14 +1,14 @@
 # BambooHR Candidate Matcher
 
 A small internal tool that scans every "New" status applicant on a BambooHR
-job posting, scores them against a pasted job description using Claude, and
+job posting, scores them against a pasted job description using Google Gemini, and
 shows you the top 10 — no need to open each profile individually.
 
 ## How it works
 
 ```
 index.html (browser)  →  Cloudflare Worker  →  BambooHR API
-                                            →  Anthropic API
+                                            →  Gemini API
 ```
 
 - **`index.html`** is the page you actually use day-to-day. Open it in a
@@ -18,7 +18,7 @@ index.html (browser)  →  Cloudflare Worker  →  BambooHR API
   1. Forwards BambooHR API requests so the browser doesn't get blocked by
      CORS restrictions (BambooHR's API isn't designed to be called directly
      from a webpage).
-  2. Holds your **Anthropic API key** as a secret and calls Claude to score
+  2. Holds your **Gemini API key** as a secret and calls Gemini to score
      candidates, so that key never has to sit in the browser.
 
 You only have to set the Worker up once. After that, using the tool is just
@@ -33,22 +33,21 @@ this option, you may need it granted by an admin. Copy the key somewhere
 safe; you'll paste it into the tool each time you use it (it isn't saved
 anywhere).
 
-### 2. Get an Anthropic API key
-Create one at [console.anthropic.com](https://console.anthropic.com) if you
-don't already have one for BinSentry's use. This one goes into the Worker,
-not the browser page.
+### 2. Get a free Gemini API key
+Create one at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) —
+no credit card required. This one goes into the Worker, not the browser page.
 
 ### 3. Deploy the Worker (Cloudflare)
 1. Go to [dash.cloudflare.com](https://dash.cloudflare.com) → **Workers & Pages**
    → **Create** → **Worker**. A free Cloudflare account works fine for this.
-2. Give it a name, e.g. `bamboohr-matcher`.
+2. Give it a name, e.g. `screening-tool`.
 3. Open the online code editor and replace the default code with everything
    in [`worker.js`](./worker.js).
 4. Go to **Settings → Variables and Secrets → Add** and create a secret:
-   - Name: `ANTHROPIC_API_KEY`
-   - Value: your Anthropic API key from step 2
+   - Name: `GEMINI_API_KEY`
+   - Value: your Gemini API key from step 2
 5. Click **Deploy**. Copy the Worker's URL — it looks like
-   `https://bamboohr-matcher.<your-subdomain>.workers.dev`.
+   `https://screening-tool.<your-subdomain>.workers.dev`.
 
 ### 4. Publish the webpage (GitHub Pages)
 1. In this repo's settings on GitHub: **Settings → Pages → Source → Deploy
@@ -78,14 +77,14 @@ shareable link.)*
 
 Resumes attached to an application are fetched and included in scoring:
 
-- **PDF resumes** are sent to Claude as a native document attachment — Claude
+- **PDF resumes** are sent to Gemini as a native document attachment — Gemini
   reads the actual file, not just extracted text.
 - **.docx resumes** are unzipped and text-extracted directly in your
   browser (no external libraries — it reads the ZIP structure and pulls text
   out of `word/document.xml`), then included as plain text.
 - Anything else (older `.doc`, scanned image-only PDFs, corrupted files) is
   skipped with a note in that candidate's data, rather than silently ignored
-  — so it won't tank a scan, but it also won't get credit for content Claude
+  — so it won't tank a scan, but it also won't get credit for content Gemini
   couldn't read.
 
 **One thing to verify on first run:** BambooHR doesn't clearly document a
