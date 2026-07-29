@@ -4,9 +4,6 @@ A small internal tool that scans every "New" status applicant on a BambooHR
 job posting, scores them against a pasted job description using Claude, and
 shows you the top 10 — no need to open each profile individually.
 
-This is a one-off / internal tool, not a BinSentry product — hence the
-`vibe-` prefix on the repo name.
-
 ## How it works
 
 ```
