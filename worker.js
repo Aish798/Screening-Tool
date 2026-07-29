@@ -135,8 +135,8 @@ async function matchCandidates(request, env) {
     return jsonResponse({ error: "Expected { jobDescription, candidates[] }" }, 400);
   }
 
-  const TEXT_ONLY_BATCH_SIZE = 10;
-  const WITH_PDF_BATCH_SIZE = 3;
+  const TEXT_ONLY_BATCH_SIZE = 20;
+  const WITH_PDF_BATCH_SIZE = 5;
 
   const batches = [];
   let i = 0;
@@ -152,9 +152,21 @@ async function matchCandidates(request, env) {
   }
 
   const allResults = [];
+  // The free tier allows only 5 requests/minute for this model, so pace
+  // calls at least ~13s apart (a bit over 60s/5) to avoid tripping the
+  // per-minute quota in the first place, on top of the retry logic below.
+  const MIN_GAP_MS = 13000;
+  let lastCallAt = 0;
+
   for (const batch of batches) {
+    const sinceLastCall = Date.now() - lastCallAt;
+    if (lastCallAt > 0 && sinceLastCall < MIN_GAP_MS) {
+      await new Promise((resolve) => setTimeout(resolve, MIN_GAP_MS - sinceLastCall));
+    }
+
     const parts = buildGeminiParts(jobDescription, batch);
     const model = "gemini-3.6-flash";
+    lastCallAt = Date.now();
     const data = await callGeminiWithRetry(model, parts, env.GEMINI_API_KEY);
     if (data.__error) {
       return jsonResponse({ error: data.__error }, 502);
@@ -180,12 +192,13 @@ async function matchCandidates(request, env) {
 }
 
 /**
- * Calls Gemini with retries + backoff for transient errors (503 "high
- * demand" / overloaded, and 429 rate limits) — these clear up on their own
- * within seconds, so retrying automatically avoids failing an entire scan
- * over a momentary hiccup on Google's free tier.
+ * Calls Gemini with retries for transient errors (503 "high demand" /
+ * overloaded, and 429 rate limits). When Google tells us how long to wait
+ * (via the RetryInfo detail or the "Please retry in Xs" message text), we
+ * honor that instead of guessing — free-tier rate-limit waits are often
+ * 20-40+ seconds, longer than a naive short backoff would cover.
  */
-async function callGeminiWithRetry(model, parts, apiKey, maxAttempts = 4) {
+async function callGeminiWithRetry(model, parts, apiKey, maxAttempts = 5) {
   let lastErrorText = "";
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const res = await fetch(
@@ -213,10 +226,37 @@ async function callGeminiWithRetry(model, parts, apiKey, maxAttempts = 4) {
       return { __error: `Gemini API error (status ${res.status}): ${lastErrorText}` };
     }
 
-    const delayMs = 1000 * Math.pow(2, attempt - 1);
+    const suggestedDelayMs = parseRetryDelayMs(lastErrorText);
+    const backoffMs = suggestedDelayMs ?? 1000 * Math.pow(2, attempt - 1);
+    // Add a small buffer on top of Google's suggested delay to be safe
+    const delayMs = suggestedDelayMs ? backoffMs + 2000 : backoffMs;
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
   return { __error: `Gemini API error after ${maxAttempts} attempts: ${lastErrorText}` };
+}
+
+/**
+ * Gemini's 429 responses often include how long to wait, either as a
+ * structured RetryInfo.retryDelay (e.g. "31s") or in the message text
+ * ("Please retry in 31.34s"). This pulls that number out in milliseconds
+ * so we can honor it instead of guessing with a fixed backoff.
+ */
+function parseRetryDelayMs(errorText) {
+  try {
+    const parsed = JSON.parse(errorText);
+    const retryInfo = (parsed?.error?.details || []).find(
+      (d) => d["@type"] === "type.googleapis.com/google.rpc.RetryInfo"
+    );
+    if (retryInfo?.retryDelay) {
+      const seconds = parseFloat(String(retryInfo.retryDelay).replace("s", ""));
+      if (!isNaN(seconds)) return Math.ceil(seconds * 1000);
+    }
+  } catch (e) {
+    // fall through to regex attempt below
+  }
+  const match = errorText.match(/retry in ([\d.]+)s/i);
+  if (match) return Math.ceil(parseFloat(match[1]) * 1000);
+  return null;
 }
 
 function buildGeminiParts(jobDescription, batch) {
