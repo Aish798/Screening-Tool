@@ -235,8 +235,7 @@
   </div>
 
   <p class="footnote">
-    Scoring is based on the applicant's answers to screening questions, cover letter/notes, and source — not resume file contents.
-    Extracting text from uploaded resume PDFs/DOCX isn't included in this version.
+    Scoring uses the applicant's answers to screening questions, cover letter/notes, source — and their resume, when one's attached (PDFs are read directly by Claude; .docx resumes are text-extracted in your browser).
     Everything runs from your browser through your own Worker; nothing is stored server-side beyond the Worker's Anthropic key. Data flow: <code>this page → your Worker → BambooHR / Anthropic</code>.
   </p>
 
@@ -295,7 +294,15 @@ async function runScan() {
     for (let i = 0; i < newApps.length; i++) {
       const app = newApps[i];
       const detail = await fetchApplicationDetail(domain, apikey, workerUrl, app.id);
-      candidates.push(buildCandidateText(app, detail));
+      const candidate = buildCandidateText(app, detail);
+
+      const resumeFileId = detail?.resumeFileId;
+      if (resumeFileId) {
+        setProgress(35 + Math.round((i / newApps.length) * 40), `Reading resume ${i + 1}/${newApps.length}…`);
+        await attachResume(candidate, domain, apikey, workerUrl, app.id, resumeFileId);
+      }
+
+      candidates.push(candidate);
       setProgress(35 + Math.round((i / newApps.length) * 40), `Fetching details… ${i + 1}/${newApps.length}`);
     }
 
@@ -360,6 +367,121 @@ async function fetchApplicationDetail(domain, apikey, workerUrl, applicationId) 
   });
   if (!res.ok) return null;
   return res.json();
+}
+
+async function attachResume(candidate, domain, apikey, workerUrl, applicationId, fileId) {
+  try {
+    const res = await fetch(`${workerUrl}/bamboohr/files/${applicationId}/${fileId}`, {
+      headers: { 'X-Bamboo-Domain': domain, 'X-Bamboo-Key': apikey },
+    });
+    if (!res.ok) {
+      candidate.text += `\n\n(Resume attached but could not be downloaded — ${res.status})`;
+      return;
+    }
+    const contentType = (res.headers.get('Content-Type') || '').toLowerCase();
+    const disposition = res.headers.get('X-Original-Content-Disposition') || '';
+    const buf = await res.arrayBuffer();
+
+    const looksLikePdf = contentType.includes('pdf') || /\.pdf(["']|$)/i.test(disposition);
+    const looksLikeDocx = contentType.includes('wordprocessingml') || /\.docx(["']|$)/i.test(disposition);
+
+    if (looksLikePdf) {
+      candidate.resumePdfBase64 = arrayBufferToBase64(buf);
+    } else if (looksLikeDocx) {
+      const text = await extractDocxText(buf);
+      if (text) {
+        candidate.text += `\n\nResume content:\n${text}`;
+      } else {
+        candidate.text += `\n\n(Resume attached as .docx but text extraction failed — scoring uses other fields only.)`;
+      }
+    } else {
+      candidate.text += `\n\n(Resume attached in an unrecognized format — scoring uses other fields only.)`;
+    }
+  } catch (e) {
+    candidate.text += `\n\n(Resume attached but an error occurred reading it: ${e.message})`;
+  }
+}
+
+function arrayBufferToBase64(buf) {
+  let binary = '';
+  const bytes = new Uint8Array(buf);
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+/**
+ * Minimal, dependency-free .docx text extractor.
+ * A .docx is a ZIP archive; this reads the central directory to locate
+ * word/document.xml, decompresses it (DEFLATE via the browser's native
+ * DecompressionStream, or stored/uncompressed), and strips XML tags.
+ * Falls back to null if the structure doesn't match what's expected —
+ * callers should treat that as "extraction failed", not throw.
+ */
+async function extractDocxText(buf) {
+  try {
+    const view = new DataView(buf);
+    const bytes = new Uint8Array(buf);
+
+    // Find End Of Central Directory record (signature 0x06054b50), searching
+    // from the end since it's followed only by a variable-length comment.
+    let eocdOffset = -1;
+    for (let i = bytes.length - 22; i >= 0; i--) {
+      if (view.getUint32(i, true) === 0x06054b50) { eocdOffset = i; break; }
+    }
+    if (eocdOffset === -1) return null;
+
+    const centralDirOffset = view.getUint32(eocdOffset + 16, true);
+    const entryCount = view.getUint16(eocdOffset + 10, true);
+
+    let ptr = centralDirOffset;
+    for (let e = 0; e < entryCount; e++) {
+      if (view.getUint32(ptr, true) !== 0x02014b50) break; // central dir signature
+      const compressionMethod = view.getUint16(ptr + 10, true);
+      const compressedSize = view.getUint32(ptr + 20, true);
+      const fileNameLen = view.getUint16(ptr + 28, true);
+      const extraLen = view.getUint16(ptr + 30, true);
+      const commentLen = view.getUint16(ptr + 32, true);
+      const localHeaderOffset = view.getUint32(ptr + 42, true);
+      const fileName = new TextDecoder().decode(bytes.subarray(ptr + 46, ptr + 46 + fileNameLen));
+
+      if (fileName === 'word/document.xml') {
+        // Read the local file header to find where the actual data starts
+        const lhFileNameLen = view.getUint16(localHeaderOffset + 26, true);
+        const lhExtraLen = view.getUint16(localHeaderOffset + 28, true);
+        const dataStart = localHeaderOffset + 30 + lhFileNameLen + lhExtraLen;
+        const compressedData = bytes.subarray(dataStart, dataStart + compressedSize);
+
+        let xmlBytes;
+        if (compressionMethod === 0) {
+          xmlBytes = compressedData;
+        } else if (compressionMethod === 8 && typeof DecompressionStream !== 'undefined') {
+          const ds = new DecompressionStream('deflate-raw');
+          const stream = new Blob([compressedData]).stream().pipeThrough(ds);
+          xmlBytes = new Uint8Array(await new Response(stream).arrayBuffer());
+        } else {
+          return null; // unsupported compression method or no DecompressionStream support
+        }
+
+        const xml = new TextDecoder().decode(xmlBytes);
+        // Insert spaces between paragraph/tab breaks before stripping tags,
+        // then collapse the rest of the markup.
+        return xml
+          .replace(/<\/w:p>/g, '\n')
+          .replace(/<w:tab\/>/g, '\t')
+          .replace(/<[^>]+>/g, '')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+      }
+
+      ptr += 46 + fileNameLen + extraLen + commentLen;
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
 }
 
 function buildCandidateText(app, detail) {

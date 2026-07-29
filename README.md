@@ -77,15 +77,35 @@ shareable link.)*
    "New" status for that job, score each one, and show you the top 10 with
    a short rationale and a direct link to their BambooHR profile.
 
+## Resume handling
+
+Resumes attached to an application are fetched and included in scoring:
+
+- **PDF resumes** are sent to Claude as a native document attachment — Claude
+  reads the actual file, not just extracted text.
+- **.docx resumes** are unzipped and text-extracted directly in your
+  browser (no external libraries — it reads the ZIP structure and pulls text
+  out of `word/document.xml`), then included as plain text.
+- Anything else (older `.doc`, scanned image-only PDFs, corrupted files) is
+  skipped with a note in that candidate's data, rather than silently ignored
+  — so it won't tank a scan, but it also won't get credit for content Claude
+  couldn't read.
+
+**One thing to verify on first run:** BambooHR doesn't clearly document a
+dedicated endpoint for downloading ATS resume/cover-letter attachments (as
+opposed to general company files), so `worker.js` tries two likely paths in
+order and uses whichever responds successfully. If both fail for your
+account, check the error message returned (it'll show the last status code)
+and adjust the `attempts` array in `proxyBambooFile()` in `worker.js` — this
+is the one part of the integration I couldn't fully confirm without a live
+account to test against.
+
 ## Known limitations (v1)
 
-- **Resume file text isn't parsed.** BambooHR returns uploaded resumes as
-  file attachments (PDF/DOCX), not as extracted text. Scoring currently uses
-  the applicant's answers to your screening questions, cover letter/notes
-  text, and application source — which is often the richest signal anyway,
-  but it means a strong resume with thin question answers may not surface as
-  well as it should. Adding PDF/DOCX text extraction is a natural next step
-  if this proves limiting.
+- **Resume downloads add real time.** Fetching and reading a resume per
+  candidate is a separate network round-trip on top of the application
+  details call, so a scan of "hundreds" of applicants will take a while —
+  the progress bar reflects this per-candidate as it runs.
 - **Field names may need small adjustments.** BambooHR's public API docs
   render client-side, so a few field names in `index.html`
   (`buildCandidateText`) are best-effort based on documented behavior. If a
@@ -96,6 +116,9 @@ shareable link.)*
   "New") rather than relying on a single BambooHR query parameter, since
   applicant tracking accounts vary in which filters are enabled. This is
   reliable but means all applications for the job get fetched first.
+- **Older `.doc` (not `.docx`) resumes aren't parsed** — that binary format
+  needs a different extraction approach. If this comes up often, worth
+  adding.
 
 ## Privacy note
 

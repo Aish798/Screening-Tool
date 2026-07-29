@@ -39,6 +39,12 @@ export default {
       if (url.pathname === "/bamboohr/applications") {
         return await proxyBambooApplications(request, url);
       }
+      // /bamboohr/files/:applicationId/:fileId  (must be checked before the
+      // more general /bamboohr/applications/ prefix match below)
+      const fileMatch = url.pathname.match(/^\/bamboohr\/files\/([^/]+)\/([^/]+)$/);
+      if (fileMatch) {
+        return await proxyBambooFile(request, fileMatch[1], fileMatch[2]);
+      }
       if (url.pathname.startsWith("/bamboohr/applications/")) {
         const applicationId = url.pathname.split("/").pop();
         return await proxyBambooApplicationDetail(request, applicationId);
@@ -104,10 +110,54 @@ async function proxyBambooApplicationDetail(request, applicationId) {
 }
 
 /**
- * Body: { jobDescription: string, candidates: [{ id, name, text }] }
+ * Downloads a resume/cover-letter file attached to an application.
+ *
+ * BambooHR's public docs don't clearly document a dedicated ATS attachment
+ * download route, so this tries the two most likely candidates in order:
+ *   1. /v1/applicant_tracking/applications/{applicationId}/files/{fileId}
+ *      (mirrors the pattern used for employee files)
+ *   2. /v1/files/{fileId}
+ *      (the general company file-repository download route)
+ * If your account's file lives somewhere else, this is the place to adjust —
+ * add another attempt to the `attempts` array below.
+ */
+async function proxyBambooFile(request, applicationId, fileId) {
+  const { domain, headers } = bambooAuthHeaders(request);
+  const attempts = [
+    `https://${domain}.bamboohr.com/api/v1/applicant_tracking/applications/${applicationId}/files/${fileId}`,
+    `https://${domain}.bamboohr.com/api/v1/files/${fileId}`,
+  ];
+
+  let lastStatus = 404;
+  for (const upstream of attempts) {
+    const res = await fetch(upstream, { headers });
+    if (res.ok) {
+      const contentType = res.headers.get("Content-Type") || "application/octet-stream";
+      const contentDisposition = res.headers.get("Content-Disposition") || "";
+      const buf = await res.arrayBuffer();
+      return new Response(buf, {
+        status: 200,
+        headers: {
+          "Content-Type": contentType,
+          "X-Original-Content-Disposition": contentDisposition,
+          ...CORS_HEADERS,
+        },
+      });
+    }
+    lastStatus = res.status;
+  }
+  return jsonResponse({ error: `Could not download file ${fileId} for application ${applicationId} (last status ${lastStatus}). BambooHR's attachment route may differ for your account — see worker.js proxyBambooFile().` }, 502);
+}
+
+/**
+ * Body: { jobDescription: string, candidates: [{ id, name, text, resumePdfBase64? }] }
  * Returns: { results: [{ id, score, rationale }] }
- * Batches candidates (to keep prompts a reasonable size) and asks Claude
- * for strict JSON output, then merges + sorts across batches.
+ *
+ * Candidates carrying a `resumePdfBase64` (their resume, if it was a PDF and
+ * the browser was able to fetch it) get that PDF attached as a native Claude
+ * document block, so Claude reads the actual resume rather than just
+ * question answers. Because attached PDFs make each request heavier, batches
+ * with attachments are kept smaller than text-only batches.
  */
 async function matchCandidates(request, env) {
   if (!env.ANTHROPIC_API_KEY) {
@@ -119,15 +169,26 @@ async function matchCandidates(request, env) {
     return jsonResponse({ error: "Expected { jobDescription, candidates[] }" }, 400);
   }
 
-  const BATCH_SIZE = 12;
+  const TEXT_ONLY_BATCH_SIZE = 12;
+  const WITH_PDF_BATCH_SIZE = 4;
+
   const batches = [];
-  for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
-    batches.push(candidates.slice(i, i + BATCH_SIZE));
+  let i = 0;
+  while (i < candidates.length) {
+    const hasPdf = !!candidates[i].resumePdfBase64;
+    const size = hasPdf ? WITH_PDF_BATCH_SIZE : TEXT_ONLY_BATCH_SIZE;
+    // Keep a batch homogeneous (all-PDF or all-text) so sizing stays predictable
+    const batch = [];
+    while (batch.length < size && i < candidates.length && !!candidates[i].resumePdfBase64 === hasPdf) {
+      batch.push(candidates[i]);
+      i++;
+    }
+    batches.push(batch);
   }
 
   const allResults = [];
   for (const batch of batches) {
-    const prompt = buildPrompt(jobDescription, batch);
+    const content = buildContent(jobDescription, batch);
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -138,7 +199,7 @@ async function matchCandidates(request, env) {
       body: JSON.stringify({
         model: "claude-sonnet-4-6",
         max_tokens: 2000,
-        messages: [{ role: "user", content: prompt }],
+        messages: [{ role: "user", content }],
       }),
     });
 
@@ -168,21 +229,37 @@ async function matchCandidates(request, env) {
   return jsonResponse({ results: allResults.slice(0, 10), totalScored: allResults.length });
 }
 
-function buildPrompt(jobDescription, batch) {
-  const candidateBlocks = batch
-    .map(
-      (c) => `--- CANDIDATE ${c.id} ---\nName: ${c.name}\nApplication content:\n${c.text || "(no additional text available)"}`
-    )
-    .join("\n\n");
+function buildContent(jobDescription, batch) {
+  const content = [];
 
-  return `You are screening job applicants against a job description. Score each candidate 0-100 on fit, based only on the information provided (do not invent facts not present in their application). Weigh required skills/experience most heavily, then relevant background, then nice-to-haves.
+  content.push({
+    type: "text",
+    text: `You are screening job applicants against a job description. Score each candidate 0-100 on fit, based only on the information provided (do not invent facts not present in their application or resume). Weigh required skills/experience most heavily, then relevant background, then nice-to-haves.
 
 JOB DESCRIPTION:
 ${jobDescription}
 
-CANDIDATES:
-${candidateBlocks}
+CANDIDATES:`,
+  });
 
-Respond with ONLY a JSON array, no other text, no markdown fences. Each element:
-{"id": "<candidate id exactly as given>", "score": <integer 0-100>, "rationale": "<1-2 sentence explanation citing specific matches or gaps>"}`;
+  for (const c of batch) {
+    content.push({
+      type: "text",
+      text: `\n--- CANDIDATE ${c.id} (${c.name}) ---\n${c.text || "(no screening-question or note text available)"}${c.resumePdfBase64 ? "\nTheir resume PDF is attached below." : ""}`,
+    });
+    if (c.resumePdfBase64) {
+      content.push({
+        type: "document",
+        source: { type: "base64", media_type: "application/pdf", data: c.resumePdfBase64 },
+      });
+    }
+  }
+
+  content.push({
+    type: "text",
+    text: `\nRespond with ONLY a JSON array, no other text, no markdown fences. Each element:
+{"id": "<candidate id exactly as given>", "score": <integer 0-100>, "rationale": "<1-2 sentence explanation citing specific matches or gaps>"}`,
+  });
+
+  return content;
 }
