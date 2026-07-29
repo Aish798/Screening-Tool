@@ -6,19 +6,18 @@
  *      browser-based tool (index.html) can call it without hitting CORS
  *      restrictions. Your BambooHR API key travels through this worker
  *      but is never stored by it.
- *   2. Calls the Anthropic API (Claude) to score/rank candidates against
- *      a pasted job description. The Anthropic API key IS stored here,
- *      as a Worker secret, so it never has to live in the browser.
+ *   2. Calls the Google Gemini API to score/rank candidates against a
+ *      pasted job description. The Gemini API key IS stored here, as a
+ *      Worker secret (free tier available, no billing required), so it
+ *      never has to live in the browser.
  *
- * Deploy (no terminal needed):
- *   1. Go to https://dash.cloudflare.com -> Workers & Pages -> Create -> Worker
- *   2. Paste this whole file into the online code editor, replacing the default.
+ * Deploy:
+ *   1. Paste this whole file as your Worker's code.
+ *   2. Get a free Gemini API key at https://aistudio.google.com/apikey
  *   3. Go to Settings -> Variables and Secrets -> add a secret:
- *        Name: ANTHROPIC_API_KEY
- *        Value: <your Anthropic API key from console.anthropic.com>
- *   4. Deploy. Copy the worker's URL (looks like
- *        https://bamboohr-matcher.<your-subdomain>.workers.dev
- *      and paste it into the "Worker URL" field in index.html.
+ *        Name: GEMINI_API_KEY
+ *        Value: <your key from aistudio.google.com>
+ *   4. Deploy. Copy the worker's URL and paste it into index.html.
  */
 
 const CORS_HEADERS = {
@@ -153,15 +152,15 @@ async function proxyBambooFile(request, applicationId, fileId) {
  * Body: { jobDescription: string, candidates: [{ id, name, text, resumePdfBase64? }] }
  * Returns: { results: [{ id, score, rationale }] }
  *
- * Candidates carrying a `resumePdfBase64` (their resume, if it was a PDF and
- * the browser was able to fetch it) get that PDF attached as a native Claude
- * document block, so Claude reads the actual resume rather than just
- * question answers. Because attached PDFs make each request heavier, batches
- * with attachments are kept smaller than text-only batches.
+ * Calls Google's Gemini API (free tier available, no billing required) to
+ * score candidates. Candidates carrying a `resumePdfBase64` get that PDF
+ * attached as inline document data so Gemini reads the actual resume, not
+ * just question answers. Because attached PDFs make each request heavier,
+ * batches with attachments are kept smaller than text-only batches.
  */
 async function matchCandidates(request, env) {
-  if (!env.ANTHROPIC_API_KEY) {
-    return jsonResponse({ error: "ANTHROPIC_API_KEY secret is not configured on this Worker." }, 500);
+  if (!env.GEMINI_API_KEY) {
+    return jsonResponse({ error: "GEMINI_API_KEY secret is not configured on this Worker." }, 500);
   }
 
   const { jobDescription, candidates } = await request.json();
@@ -169,15 +168,14 @@ async function matchCandidates(request, env) {
     return jsonResponse({ error: "Expected { jobDescription, candidates[] }" }, 400);
   }
 
-  const TEXT_ONLY_BATCH_SIZE = 12;
-  const WITH_PDF_BATCH_SIZE = 4;
+  const TEXT_ONLY_BATCH_SIZE = 10;
+  const WITH_PDF_BATCH_SIZE = 3;
 
   const batches = [];
   let i = 0;
   while (i < candidates.length) {
     const hasPdf = !!candidates[i].resumePdfBase64;
     const size = hasPdf ? WITH_PDF_BATCH_SIZE : TEXT_ONLY_BATCH_SIZE;
-    // Keep a batch homogeneous (all-PDF or all-text) so sizing stays predictable
     const batch = [];
     while (batch.length < size && i < candidates.length && !!candidates[i].resumePdfBase64 === hasPdf) {
       batch.push(candidates[i]);
@@ -188,30 +186,31 @@ async function matchCandidates(request, env) {
 
   const allResults = [];
   for (const batch of batches) {
-    const content = buildContent(jobDescription, batch);
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 2000,
-        messages: [{ role: "user", content }],
-      }),
-    });
+    const parts = buildGeminiParts(jobDescription, batch);
+    const model = "gemini-2.5-flash";
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": env.GEMINI_API_KEY,
+        },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts }],
+          generationConfig: { responseMimeType: "application/json" },
+        }),
+      }
+    );
 
     if (!res.ok) {
       const errText = await res.text();
-      return jsonResponse({ error: `Anthropic API error: ${errText}` }, 502);
+      return jsonResponse({ error: `Gemini API error: ${errText}` }, 502);
     }
 
     const data = await res.json();
-    const text = (data.content || [])
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
+    const text = (data.candidates?.[0]?.content?.parts || [])
+      .map((p) => p.text || "")
       .join("\n");
 
     let parsed;
@@ -229,11 +228,10 @@ async function matchCandidates(request, env) {
   return jsonResponse({ results: allResults.slice(0, 10), totalScored: allResults.length });
 }
 
-function buildContent(jobDescription, batch) {
-  const content = [];
+function buildGeminiParts(jobDescription, batch) {
+  const parts = [];
 
-  content.push({
-    type: "text",
+  parts.push({
     text: `You are screening job applicants against a job description. Score each candidate 0-100 on fit, based only on the information provided (do not invent facts not present in their application or resume). Weigh required skills/experience most heavily, then relevant background, then nice-to-haves.
 
 JOB DESCRIPTION:
@@ -243,23 +241,20 @@ CANDIDATES:`,
   });
 
   for (const c of batch) {
-    content.push({
-      type: "text",
+    parts.push({
       text: `\n--- CANDIDATE ${c.id} (${c.name}) ---\n${c.text || "(no screening-question or note text available)"}${c.resumePdfBase64 ? "\nTheir resume PDF is attached below." : ""}`,
     });
     if (c.resumePdfBase64) {
-      content.push({
-        type: "document",
-        source: { type: "base64", media_type: "application/pdf", data: c.resumePdfBase64 },
+      parts.push({
+        inline_data: { mime_type: "application/pdf", data: c.resumePdfBase64 },
       });
     }
   }
 
-  content.push({
-    type: "text",
+  parts.push({
     text: `\nRespond with ONLY a JSON array, no other text, no markdown fences. Each element:
 {"id": "<candidate id exactly as given>", "score": <integer 0-100>, "rationale": "<1-2 sentence explanation citing specific matches or gaps>"}`,
   });
 
-  return content;
+  return parts;
 }
