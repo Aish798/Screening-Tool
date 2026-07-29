@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Candidate Matcher — BambooHR</title>
+<style>
+  :root {
+    --ink: #16212b;
+    --ink-soft: #4a5a68;
+    --paper: #f6f7f5;
+    --panel: #ffffff;
+    --line: #dde3e3;
+    --accent: #2f6f5e;
+    --accent-soft: #e4efe9;
+    --warn: #b5542a;
+    --mono: 'IBM Plex Mono', 'SF Mono', Menlo, monospace;
+    --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    padding: 40px 24px 80px;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+
+  header { margin-bottom: 32px; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 8px;
+  }
+  h1 {
+    font-size: 30px;
+    margin: 0 0 6px;
+    letter-spacing: -0.01em;
+  }
+  .sub { color: var(--ink-soft); font-size: 15px; margin: 0; max-width: 60ch; }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 24px;
+    margin-bottom: 20px;
+  }
+  .panel h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink-soft);
+    margin: 0 0 16px;
+    font-family: var(--mono);
+  }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 640px) { .grid2 { grid-template-columns: 1fr; } }
+
+  label {
+    display: block;
+    font-size: 13px;
+    color: var(--ink-soft);
+    margin-bottom: 6px;
+    font-weight: 500;
+  }
+  input[type=text], input[type=password], textarea {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font-size: 14px;
+    font-family: var(--sans);
+    background: #fff;
+    color: var(--ink);
+  }
+  input:focus, textarea:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    border-color: var(--accent);
+  }
+  textarea { resize: vertical; min-height: 160px; line-height: 1.5; }
+  .field { margin-bottom: 14px; }
+  .hint { font-size: 12px; color: var(--ink-soft); margin-top: 5px; }
+
+  button.primary {
+    background: var(--ink);
+    color: #fff;
+    border: none;
+    padding: 12px 22px;
+    border-radius: 6px;
+    font-size: 14.5px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: var(--sans);
+  }
+  button.primary:hover { background: #223140; }
+  button.primary:disabled { background: #9aa5ab; cursor: not-allowed; }
+
+  .progress-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 16px;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ink-soft);
+  }
+  .bar {
+    flex: 1;
+    height: 6px;
+    background: var(--line);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    background: var(--accent);
+    width: 0%;
+    transition: width 0.2s ease;
+  }
+
+  .error-box {
+    background: #fbeeea;
+    border: 1px solid #e2b6a2;
+    color: var(--warn);
+    padding: 12px 14px;
+    border-radius: 6px;
+    font-size: 13.5px;
+    margin-top: 14px;
+    white-space: pre-wrap;
+  }
+
+  .results h2 { font-family: var(--sans); text-transform: none; letter-spacing: 0; font-size: 20px; color: var(--ink); }
+  .rank-card {
+    display: grid;
+    grid-template-columns: 44px 1fr auto;
+    gap: 16px;
+    align-items: start;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .rank-card:last-child { border-bottom: none; }
+  .rank-num {
+    font-family: var(--mono);
+    font-size: 20px;
+    color: var(--accent);
+    font-weight: 600;
+    padding-top: 2px;
+  }
+  .cand-name { font-weight: 600; font-size: 15.5px; margin: 0 0 4px; }
+  .cand-rationale { font-size: 13.5px; color: var(--ink-soft); margin: 0 0 6px; line-height: 1.5; }
+  .cand-link { font-size: 12.5px; }
+  .cand-link a { color: var(--accent); text-decoration: none; }
+  .cand-link a:hover { text-decoration: underline; }
+  .score-pill {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-radius: 20px;
+    padding: 4px 12px;
+    height: fit-content;
+    white-space: nowrap;
+  }
+
+  .footnote { font-size: 12px; color: var(--ink-soft); margin-top: 28px; line-height: 1.6; }
+  .footnote code { font-family: var(--mono); background: #eceeec; padding: 1px 5px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">Candidate scanner</p>
+    <h1>Screen every applicant at once</h1>
+    <p class="sub">Pull all "New" status applicants for a job posting from BambooHR, score them against a job description, and see the top 10 — without opening a single profile.</p>
+  </header>
+
+  <div class="panel">
+    <h2>01 · Connection</h2>
+    <div class="grid2">
+      <div class="field">
+        <label for="domain">BambooHR subdomain</label>
+        <input type="text" id="domain" placeholder="e.g. binsentry" />
+        <div class="hint">The part before .bamboohr.com in your BambooHR URL</div>
+      </div>
+      <div class="field">
+        <label for="apikey">BambooHR API key</label>
+        <input type="password" id="apikey" placeholder="Paste your API key" />
+        <div class="hint">Settings → API Keys in BambooHR. Kept in this browser tab only.</div>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="field">
+        <label for="workerurl">Worker URL</label>
+        <input type="text" id="workerurl" placeholder="https://bamboohr-matcher.xxx.workers.dev" />
+        <div class="hint">Your deployed Cloudflare Worker (see README)</div>
+      </div>
+      <div class="field">
+        <label for="jobid">Job ID</label>
+        <input type="text" id="jobid" placeholder="e.g. 42" />
+        <div class="hint">Found in the BambooHR job posting URL</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>02 · Job description</h2>
+    <div class="field">
+      <label for="jd">Paste the job description</label>
+      <textarea id="jd" placeholder="Paste the full job posting text here — required skills, experience, responsibilities..."></textarea>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>03 · Run</h2>
+    <button class="primary" id="scanBtn">Scan applications</button>
+    <div class="progress-row" id="progressRow" style="display:none;">
+      <span id="progressLabel">Fetching applications…</span>
+      <div class="bar"><div class="bar-fill" id="barFill"></div></div>
+    </div>
+    <div id="errorBox"></div>
+  </div>
+
+  <div class="panel results" id="resultsPanel" style="display:none;">
+    <h2 id="resultsHeading">Top candidates</h2>
+    <div id="resultsList"></div>
+  </div>
+
+  <p class="footnote">
+    Scoring is based on the applicant's answers to screening questions, cover letter/notes, and source — not resume file contents.
+    Extracting text from uploaded resume PDFs/DOCX isn't included in this version.
+    Everything runs from your browser through your own Worker; nothing is stored server-side beyond the Worker's Anthropic key. Data flow: <code>this page → your Worker → BambooHR / Anthropic</code>.
+  </p>
+
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+$('scanBtn').addEventListener('click', runScan);
+
+function setProgress(pct, label) {
+  $('progressRow').style.display = 'flex';
+  $('barFill').style.width = pct + '%';
+  if (label) $('progressLabel').textContent = label;
+}
+
+function showError(msg) {
+  $('errorBox').innerHTML = `<div class="error-box">${msg}</div>`;
+}
+
+function clearError() {
+  $('errorBox').innerHTML = '';
+}
+
+async function runScan() {
+  clearError();
+  $('resultsPanel').style.display = 'none';
+
+  const domain = $('domain').value.trim();
+  const apikey = $('apikey').value.trim();
+  const workerUrl = $('workerurl').value.trim().replace(/\/$/, '');
+  const jobId = $('jobid').value.trim();
+  const jd = $('jd').value.trim();
+
+  if (!domain || !apikey || !workerUrl || !jobId || !jd) {
+    showError('Please fill in all fields: subdomain, API key, Worker URL, Job ID, and job description.');
+    return;
+  }
+
+  $('scanBtn').disabled = true;
+  setProgress(5, 'Fetching applications from BambooHR…');
+
+  try {
+    const applications = await fetchAllApplications(domain, apikey, jobId);
+    const newApps = applications.filter(isNewStatus);
+
+    if (newApps.length === 0) {
+      showError(`Found ${applications.length} total application(s) for this job, but none matched "New" status. Check the Job ID, or that applicants are in that status.`);
+      $('scanBtn').disabled = false;
+      return;
+    }
+
+    setProgress(35, `Found ${newApps.length} new applicant(s). Fetching details…`);
+
+    const candidates = [];
+    for (let i = 0; i < newApps.length; i++) {
+      const app = newApps[i];
+      const detail = await fetchApplicationDetail(domain, apikey, workerUrl, app.id);
+      candidates.push(buildCandidateText(app, detail));
+      setProgress(35 + Math.round((i / newApps.length) * 40), `Fetching details… ${i + 1}/${newApps.length}`);
+    }
+
+    setProgress(80, 'Scoring candidates against the job description…');
+
+    const matchRes = await fetch(`${workerUrl}/match`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobDescription: jd, candidates }),
+    });
+
+    if (!matchRes.ok) {
+      const errBody = await matchRes.text();
+      throw new Error(`Matching step failed: ${errBody}`);
+    }
+
+    const matchData = await matchRes.json();
+    setProgress(100, 'Done.');
+
+    renderResults(matchData.results, candidates, domain, newApps.length);
+  } catch (err) {
+    showError('Something went wrong: ' + (err.message || err));
+  } finally {
+    $('scanBtn').disabled = false;
+  }
+}
+
+function isNewStatus(app) {
+  const s = (app.status && (app.status.label || app.status)) || app.applicationStatus || '';
+  return String(s).toLowerCase().trim() === 'new';
+}
+
+async function fetchAllApplications(domain, apikey, jobId) {
+  let all = [];
+  let page = 1;
+  const workerUrl = $('workerurl').value.trim().replace(/\/$/, '');
+  while (true) {
+    const url = new URL(`${workerUrl}/bamboohr/applications`);
+    url.searchParams.set('jobId', jobId);
+    url.searchParams.set('page', page);
+    const res = await fetch(url.toString(), {
+      headers: { 'X-Bamboo-Domain': domain, 'X-Bamboo-Key': apikey },
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`BambooHR applications request failed (page ${page}): ${body}`);
+    }
+    const data = await res.json();
+    const batch = data.applications || data.results || (Array.isArray(data) ? data : []);
+    if (!batch || batch.length === 0) break;
+    all = all.concat(batch);
+    if (batch.length < 25) break; // heuristic: fewer than a full page means we're done
+    page++;
+    if (page > 50) break; // safety cap
+  }
+  return all;
+}
+
+async function fetchApplicationDetail(domain, apikey, workerUrl, applicationId) {
+  const res = await fetch(`${workerUrl}/bamboohr/applications/${applicationId}`, {
+    headers: { 'X-Bamboo-Domain': domain, 'X-Bamboo-Key': apikey },
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+function buildCandidateText(app, detail) {
+  const name = [app.applicant?.firstName, app.applicant?.lastName].filter(Boolean).join(' ')
+    || app.applicantName || app.name || `Applicant ${app.id}`;
+
+  const parts = [];
+  if (detail?.answers) {
+    for (const a of detail.answers) {
+      if (a.question && a.answer) parts.push(`Q: ${a.question}\nA: ${a.answer}`);
+    }
+  }
+  if (detail?.coverLetter) parts.push(`Cover letter: ${detail.coverLetter}`);
+  if (detail?.notes) parts.push(`Notes: ${detail.notes}`);
+  if (app.source) parts.push(`Source: ${app.source}`);
+  if (app.appliedDate) parts.push(`Applied: ${app.appliedDate}`);
+
+  return {
+    id: String(app.id),
+    name,
+    text: parts.join('\n\n'),
+    profileId: app.id,
+  };
+}
+
+function renderResults(results, candidates, domain, totalNew) {
+  $('resultsPanel').style.display = 'block';
+  $('resultsHeading').textContent = `Top ${results.length} of ${totalNew} new applicants`;
+  const byId = Object.fromEntries(candidates.map(c => [c.id, c]));
+
+  $('resultsList').innerHTML = results.map((r, i) => {
+    const cand = byId[r.id] || { name: `Applicant ${r.id}` };
+    const link = `https://${domain}.bamboohr.com/hiring/applications/${r.id}`;
+    return `
+      <div class="rank-card">
+        <div class="rank-num">${String(i + 1).padStart(2, '0')}</div>
+        <div>
+          <p class="cand-name">${escapeHtml(cand.name)}</p>
+          <p class="cand-rationale">${escapeHtml(r.rationale || '')}</p>
+          <p class="cand-link"><a href="${link}" target="_blank" rel="noopener">Open profile in BambooHR →</a></p>
+        </div>
+        <div class="score-pill">${r.score}/100</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+</script>
+</body>
+</html>
