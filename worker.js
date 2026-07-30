@@ -165,7 +165,7 @@ async function matchCandidates(request, env) {
     }
 
     const parts = buildGeminiParts(jobDescription, batch);
-    const model = "gemini-3.6-flash";
+    const model = "gemini-3.5-flash-lite";
     lastCallAt = Date.now();
     const data = await callGeminiWithRetry(model, parts, env.GEMINI_API_KEY);
     if (data.__error) {
