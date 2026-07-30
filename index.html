@@ -169,6 +169,24 @@
     height: fit-content;
     white-space: nowrap;
   }
+  .shortlist-btn {
+    margin-top: 8px;
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    padding: 5px 12px;
+    border-radius: 6px;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: var(--sans);
+  }
+  .shortlist-btn:hover { background: var(--accent-soft); }
+  .shortlist-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+  .shortlist-status { font-size: 12px; margin-top: 6px; }
+  .shortlist-status.ok { color: var(--accent); }
+  .shortlist-status.err { color: var(--warn); }
+  }
 
   .footnote { font-size: 12px; color: var(--ink-soft); margin-top: 28px; line-height: 1.6; }
   .footnote code { font-family: var(--mono); background: #eceeec; padding: 1px 5px; border-radius: 3px; }
@@ -573,11 +591,81 @@ function renderResults(results, candidates, domain, totalNew) {
           <p class="cand-name">${escapeHtml(cand.name)}</p>
           <p class="cand-rationale">${escapeHtml(r.rationale || '')}</p>
           <p class="cand-link"><a href="${link}" target="_blank" rel="noopener">Open profile in BambooHR →</a></p>
+          <button class="shortlist-btn" onclick="shortlistCandidate('${r.id}', '${escapeHtml(cand.name).replace(/'/g, "\\'")}', this)">Mark as Shortlisted</button>
+          <div class="shortlist-status" id="shortlist-status-${r.id}"></div>
         </div>
         <div class="score-pill">${r.score}/100</div>
       </div>
     `;
   }).join('');
+}
+
+let cachedStatuses = null;
+
+async function getShortlistStatus(workerUrl, domain, apikey) {
+  if (cachedStatuses) return cachedStatuses;
+
+  const res = await fetch(`${workerUrl}/bamboohr/statuses`, {
+    headers: { 'X-Bamboo-Domain': domain, 'X-Bamboo-Key': apikey },
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Could not load BambooHR statuses: ${body}`);
+  }
+  const data = await res.json();
+  const list = Array.isArray(data) ? data : (data.statuses || data.results || []);
+  const match = list.find(s => String(s.name || s.label || '').toLowerCase().includes('shortlist'));
+
+  cachedStatuses = { list, match };
+  return cachedStatuses;
+}
+
+async function shortlistCandidate(applicationId, candidateName, buttonEl) {
+  const domain = $('domain').value.trim();
+  const apikey = $('apikey').value.trim();
+  const workerUrl = $('workerurl').value.trim().replace(/\/$/, '');
+  const statusEl = $(`shortlist-status-${applicationId}`);
+
+  if (!confirm(`Mark ${candidateName} as "Shortlisted" in BambooHR? This updates their real application status.`)) {
+    return;
+  }
+
+  buttonEl.disabled = true;
+  buttonEl.textContent = 'Updating…';
+  statusEl.textContent = '';
+  statusEl.className = 'shortlist-status';
+
+  try {
+    const { list, match } = await getShortlistStatus(workerUrl, domain, apikey);
+    if (!match) {
+      const names = list.map(s => s.name || s.label).filter(Boolean).join(', ');
+      throw new Error(`No status containing "Shortlist" was found. Available statuses: ${names || '(none returned)'}`);
+    }
+
+    const res = await fetch(`${workerUrl}/bamboohr/applications/${applicationId}/status`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Bamboo-Domain': domain,
+        'X-Bamboo-Key': apikey,
+      },
+      body: JSON.stringify({ status: match.id }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(body);
+    }
+
+    buttonEl.textContent = '✓ Shortlisted';
+    statusEl.textContent = `Status updated to "${match.name || match.label}"`;
+    statusEl.className = 'shortlist-status ok';
+  } catch (e) {
+    buttonEl.disabled = false;
+    buttonEl.textContent = 'Mark as Shortlisted';
+    statusEl.textContent = `Failed: ${e.message}`;
+    statusEl.className = 'shortlist-status err';
+  }
 }
 
 function escapeHtml(str) {
