@@ -96,6 +96,27 @@ and adjust the `attempts` array in `proxyBambooFile()` in `worker.js` — this
 is the one part of the integration I couldn't fully confirm without a live
 account to test against.
 
+## Shortlisting candidates
+
+Each of the top 10 results has a **"Mark as Shortlisted"** button. This is a
+real, deliberate action — nothing happens automatically:
+
+1. Clicking it asks you to confirm (since it changes an actual candidate's
+   status in BambooHR).
+2. On confirmation, it looks up BambooHR's list of applicant statuses,
+   finds the one containing "Shortlist", and updates that one candidate's
+   application status to it.
+3. You'll see either a success message or a specific error right under that
+   candidate's card.
+
+**This is the least-tested part of the tool.** BambooHR's public docs don't
+fully specify the exact request body this endpoint expects, so the first
+time you try it, if it fails, the error message shown will be BambooHR's
+own response — paste that back and it's usually a quick fix to the request
+shape in `worker.js` (`proxyUpdateStatus` and `shortlistCandidate`).
+Recommend testing on one low-stakes candidate first before relying on it
+for a real shortlist pass.
+
 ## Known limitations (v1)
 
 - **Resume downloads add real time.** Fetching and reading a resume per
