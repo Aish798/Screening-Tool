@@ -307,22 +307,12 @@ async function runScan() {
     }
 
     setProgress(80, 'Scoring candidates against the job description…');
-
-    const matchRes = await fetch(`${workerUrl}/match`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobDescription: jd, candidates }),
+    const results = await scoreCandidates(workerUrl, jd, candidates, (done, total) => {
+      setProgress(80 + Math.round((done / total) * 18), `Scoring… batch ${done}/${total}`);
     });
 
-    if (!matchRes.ok) {
-      const errBody = await matchRes.text();
-      throw new Error(`Matching step failed: ${errBody}`);
-    }
-
-    const matchData = await matchRes.json();
     setProgress(100, 'Done.');
-
-    renderResults(matchData.results, candidates, domain, newApps.length);
+    renderResults(results, candidates, domain, newApps.length);
   } catch (err) {
     showError('Something went wrong: ' + (err.message || err));
   } finally {
@@ -505,6 +495,67 @@ function buildCandidateText(app, detail) {
     text: parts.join('\n\n'),
     profileId: app.id,
   };
+}
+
+/**
+ * Splits candidates into batches and calls the Worker's /match endpoint
+ * once PER BATCH (rather than sending everything in one request). This
+ * keeps each individual Worker invocation lightweight — important because
+ * Cloudflare's free plan caps a single invocation at 50 outgoing
+ * subrequests, which a single big request covering hundreds of candidates
+ * could otherwise exceed and crash. Pacing between calls also respects
+ * Gemini's free-tier per-minute rate limit.
+ */
+async function scoreCandidates(workerUrl, jobDescription, candidates, onProgress) {
+  const TEXT_ONLY_BATCH_SIZE = 15;
+  const WITH_PDF_BATCH_SIZE = 4;
+  const MIN_GAP_MS = 4500; // stay comfortably under free-tier per-minute limits
+
+  const batches = [];
+  let i = 0;
+  while (i < candidates.length) {
+    const hasPdf = !!candidates[i].resumePdfBase64;
+    const size = hasPdf ? WITH_PDF_BATCH_SIZE : TEXT_ONLY_BATCH_SIZE;
+    const batch = [];
+    while (batch.length < size && i < candidates.length && !!candidates[i].resumePdfBase64 === hasPdf) {
+      batch.push(candidates[i]);
+      i++;
+    }
+    batches.push(batch);
+  }
+
+  const allResults = [];
+  let lastCallAt = 0;
+
+  for (let b = 0; b < batches.length; b++) {
+    const sinceLastCall = Date.now() - lastCallAt;
+    if (lastCallAt > 0 && sinceLastCall < MIN_GAP_MS) {
+      await new Promise((resolve) => setTimeout(resolve, MIN_GAP_MS - sinceLastCall));
+    }
+
+    lastCallAt = Date.now();
+    try {
+      const res = await fetch(`${workerUrl}/match`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobDescription, candidates: batches[b] }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.results)) allResults.push(...data.results);
+      }
+      // A single failed batch doesn't abort the whole scan — it just means
+      // those few candidates won't appear in results. This matters more as
+      // scan size grows: one transient hiccup shouldn't cost the whole run.
+    } catch (e) {
+      // network-level failure for this batch — skip and continue
+    }
+
+    onProgress(b + 1, batches.length);
+  }
+
+  allResults.sort((a, b) => (b.score || 0) - (a.score || 0));
+  return allResults.slice(0, 10);
 }
 
 function renderResults(results, candidates, domain, totalNew) {
