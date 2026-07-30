@@ -125,6 +125,20 @@ async function proxyBambooFile(request, applicationId, fileId) {
   return jsonResponse({ error: `Could not download file ${fileId} for application ${applicationId} (last status ${lastStatus}). BambooHR's attachment route may differ for your account — see proxyBambooFile().` }, 502);
 }
 
+/**
+ * Scores ONE batch of candidates per call. The browser is responsible for
+ * splitting candidates into batches and calling this endpoint once per
+ * batch (with pacing between calls) — see index.html's scoreCandidates().
+ *
+ * This is deliberately NOT a single request that loops through every batch
+ * internally: Cloudflare's free plan caps a single Worker invocation at 50
+ * outgoing subrequests, and a large scan (hundreds of candidates, dozens of
+ * batches, each possibly retried) can blow past that within one request,
+ * which crashes the whole invocation with an opaque 502. Doing one batch
+ * per HTTP call keeps each individual invocation's subrequest count low
+ * (1 call, plus a few retries at most) regardless of how many total
+ * candidates a scan covers.
+ */
 async function matchCandidates(request, env) {
   if (!env.GEMINI_API_KEY) {
     return jsonResponse({ error: "GEMINI_API_KEY secret is not configured on this Worker." }, 500);
@@ -132,63 +146,30 @@ async function matchCandidates(request, env) {
 
   const { jobDescription, candidates } = await request.json();
   if (!jobDescription || !Array.isArray(candidates)) {
-    return jsonResponse({ error: "Expected { jobDescription, candidates[] }" }, 400);
+    return jsonResponse({ error: "Expected { jobDescription, candidates[] } (one batch)" }, 400);
   }
 
-  const TEXT_ONLY_BATCH_SIZE = 20;
-  const WITH_PDF_BATCH_SIZE = 5;
-
-  const batches = [];
-  let i = 0;
-  while (i < candidates.length) {
-    const hasPdf = !!candidates[i].resumePdfBase64;
-    const size = hasPdf ? WITH_PDF_BATCH_SIZE : TEXT_ONLY_BATCH_SIZE;
-    const batch = [];
-    while (batch.length < size && i < candidates.length && !!candidates[i].resumePdfBase64 === hasPdf) {
-      batch.push(candidates[i]);
-      i++;
-    }
-    batches.push(batch);
+  const parts = buildGeminiParts(jobDescription, candidates);
+  const model = "gemini-3.5-flash-lite";
+  const data = await callGeminiWithRetry(model, parts, env.GEMINI_API_KEY);
+  if (data.__error) {
+    return jsonResponse({ error: data.__error }, 502);
   }
 
-  const allResults = [];
-  // The free tier allows only 5 requests/minute for this model, so pace
-  // calls at least ~13s apart (a bit over 60s/5) to avoid tripping the
-  // per-minute quota in the first place, on top of the retry logic below.
-  const MIN_GAP_MS = 13000;
-  let lastCallAt = 0;
+  const text = (data.candidates?.[0]?.content?.parts || [])
+    .map((p) => p.text || "")
+    .join("\n");
 
-  for (const batch of batches) {
-    const sinceLastCall = Date.now() - lastCallAt;
-    if (lastCallAt > 0 && sinceLastCall < MIN_GAP_MS) {
-      await new Promise((resolve) => setTimeout(resolve, MIN_GAP_MS - sinceLastCall));
-    }
-
-    const parts = buildGeminiParts(jobDescription, batch);
-    const model = "gemini-3.5-flash-lite";
-    lastCallAt = Date.now();
-    const data = await callGeminiWithRetry(model, parts, env.GEMINI_API_KEY);
-    if (data.__error) {
-      return jsonResponse({ error: data.__error }, 502);
-    }
-
-    const text = (data.candidates?.[0]?.content?.parts || [])
-      .map((p) => p.text || "")
-      .join("\n");
-
-    let parsed;
-    try {
-      const cleaned = text.replace(/```json|```/g, "").trim();
-      parsed = JSON.parse(cleaned);
-    } catch (e) {
-      continue;
-    }
-
-    if (Array.isArray(parsed)) allResults.push(...parsed);
+  let parsed = [];
+  try {
+    const cleaned = text.replace(/```json|```/g, "").trim();
+    parsed = JSON.parse(cleaned);
+    if (!Array.isArray(parsed)) parsed = [];
+  } catch (e) {
+    parsed = [];
   }
 
-  allResults.sort((a, b) => (b.score || 0) - (a.score || 0));
-  return jsonResponse({ results: allResults.slice(0, 10), totalScored: allResults.length });
+  return jsonResponse({ results: parsed });
 }
 
 /**
