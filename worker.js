@@ -34,6 +34,13 @@ export default {
       if (fileMatch) {
         return await proxyBambooFile(request, fileMatch[1], fileMatch[2]);
       }
+      if (url.pathname === "/bamboohr/statuses") {
+        return await proxyBambooStatuses(request);
+      }
+      const statusUpdateMatch = url.pathname.match(/^\/bamboohr\/applications\/([^/]+)\/status$/);
+      if (statusUpdateMatch && request.method === "POST") {
+        return await proxyUpdateStatus(request, statusUpdateMatch[1]);
+      }
       if (url.pathname.startsWith("/bamboohr/applications/")) {
         const applicationId = url.pathname.split("/").pop();
         return await proxyBambooApplicationDetail(request, applicationId);
@@ -95,6 +102,55 @@ async function proxyBambooApplicationDetail(request, applicationId) {
   const res = await fetch(upstream, { headers });
   const body = await res.text();
   return new Response(body, { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
+}
+
+/**
+ * Fetches the list of valid applicant statuses (needed to know the ID for
+ * "Shortlist" before updating an application). BambooHR's docs reference a
+ * "Get Applicant Statuses" endpoint without a fully confirmed URL, so this
+ * tries the two most likely paths in order.
+ */
+async function proxyBambooStatuses(request) {
+  const { domain, headers } = bambooAuthHeaders(request);
+  const attempts = [
+    `https://${domain}.bamboohr.com/api/v1/applicant_tracking/applications/statuses`,
+    `https://${domain}.bamboohr.com/api/v1/applicant_tracking/statuses`,
+  ];
+  let lastStatus = 404;
+  let lastBody = "";
+  for (const upstream of attempts) {
+    const res = await fetch(upstream, { headers });
+    if (res.ok) {
+      const body = await res.text();
+      return new Response(body, { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
+    }
+    lastStatus = res.status;
+    lastBody = await res.text();
+  }
+  return jsonResponse({ error: `Could not fetch applicant statuses (last status ${lastStatus}): ${lastBody}` }, 502);
+}
+
+/**
+ * Updates an application's status (e.g. to "Shortlist"). Forwards whatever
+ * JSON body the browser sends straight through to BambooHR — the exact
+ * expected body shape isn't fully confirmed from public docs, so if this
+ * errors, the response text below will show BambooHR's own complaint about
+ * what's wrong with the request, which is the fastest way to correct it.
+ */
+async function proxyUpdateStatus(request, applicationId) {
+  const { domain, headers } = bambooAuthHeaders(request);
+  const requestBody = await request.text();
+  const upstream = `https://${domain}.bamboohr.com/api/v1/applicant_tracking/applications/${applicationId}/status`;
+  const res = await fetch(upstream, {
+    method: "POST",
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: requestBody,
+  });
+  const responseBody = await res.text();
+  return new Response(responseBody, {
+    status: res.status,
+    headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+  });
 }
 
 async function proxyBambooFile(request, applicationId, fileId) {
