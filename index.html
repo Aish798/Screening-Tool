@@ -183,6 +183,33 @@
   }
   .shortlist-btn:hover { background: var(--accent-soft); }
   .shortlist-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+  .action-row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .reviewed-btn {
+    background: transparent;
+    color: var(--ink-soft);
+    border: 1px solid var(--ink-soft);
+    padding: 5px 12px;
+    border-radius: 6px;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: var(--sans);
+  }
+  .reviewed-btn:hover { background: #eceeec; }
+  .reviewed-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+  .reject-btn {
+    background: transparent;
+    color: var(--warn);
+    border: 1px solid var(--warn);
+    padding: 5px 12px;
+    border-radius: 6px;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: var(--sans);
+  }
+  .reject-btn:hover { background: #fbeeea; }
+  .reject-btn:disabled { opacity: 0.6; cursor: not-allowed; }
   .shortlist-status { font-size: 12px; margin-top: 6px; }
   .shortlist-status.ok { color: var(--accent); }
   .shortlist-status.err { color: var(--warn); }
@@ -583,15 +610,18 @@ function renderResults(results, candidates, domain, totalNew) {
 
   $('resultsList').innerHTML = results.map((r, i) => {
     const cand = byId[r.id] || { name: `Applicant ${r.id}` };
-    const link = `https://${domain}.bamboohr.com/hiring/applications/${r.id}`;
+    const safeName = escapeHtml(cand.name).replace(/'/g, "\\'");
     return `
       <div class="rank-card">
         <div class="rank-num">${String(i + 1).padStart(2, '0')}</div>
         <div>
           <p class="cand-name">${escapeHtml(cand.name)}</p>
           <p class="cand-rationale">${escapeHtml(r.rationale || '')}</p>
-          <p class="cand-link"><a href="${link}" target="_blank" rel="noopener">Open profile in BambooHR →</a></p>
-          <button class="shortlist-btn" onclick="shortlistCandidate('${r.id}', '${escapeHtml(cand.name).replace(/'/g, "\\'")}', this)">Mark as Shortlisted</button>
+          <div class="action-row">
+            <button class="shortlist-btn" onclick="updateCandidateStatus('${r.id}', '${safeName}', 'shortlist', this)">Mark as Shortlisted</button>
+            <button class="reviewed-btn" onclick="updateCandidateStatus('${r.id}', '${safeName}', 'reviewed', this)">Mark as Reviewed</button>
+            <button class="reject-btn" onclick="updateCandidateStatus('${r.id}', '${safeName}', 'reject', this)">To Be Rejected</button>
+          </div>
           <div class="shortlist-status" id="shortlist-status-${r.id}"></div>
         </div>
         <div class="score-pill">${r.score}/100</div>
@@ -602,7 +632,7 @@ function renderResults(results, candidates, domain, totalNew) {
 
 let cachedStatuses = null;
 
-async function getShortlistStatus(workerUrl, domain, apikey) {
+async function getAllStatuses(workerUrl, domain, apikey) {
   if (cachedStatuses) return cachedStatuses;
 
   const res = await fetch(`${workerUrl}/bamboohr/statuses`, {
@@ -614,19 +644,34 @@ async function getShortlistStatus(workerUrl, domain, apikey) {
   }
   const data = await res.json();
   const list = Array.isArray(data) ? data : (data.statuses || data.results || []);
-  const match = list.find(s => String(s.name || s.label || '').toLowerCase().includes('shortlist'));
 
-  cachedStatuses = { list, match };
+  cachedStatuses = list;
   return cachedStatuses;
 }
 
-async function shortlistCandidate(applicationId, candidateName, buttonEl) {
+const STATUS_ACTIONS = {
+  shortlist: { label: 'Shortlisted', keyword: 'shortlist' },
+  reviewed: { label: 'Reviewed', keyword: 'review' },
+  reject: { label: 'To Be Rejected', keyword: 'reject' },
+};
+
+/**
+ * action: one of the keys in STATUS_ACTIONS above. Each matches against
+ * BambooHR status names containing its keyword. If your BambooHR account
+ * uses different wording for any of these (e.g. "Not a Fit" instead of
+ * "Reject"), the error message will list every available status name so
+ * it's a quick fix — either rename the status in BambooHR to include the
+ * keyword, or adjust the keyword here to match what you actually have.
+ */
+async function updateCandidateStatus(applicationId, candidateName, action, buttonEl) {
   const domain = $('domain').value.trim();
   const apikey = $('apikey').value.trim();
   const workerUrl = $('workerurl').value.trim().replace(/\/$/, '');
   const statusEl = $(`shortlist-status-${applicationId}`);
+  const { label, keyword } = STATUS_ACTIONS[action];
+  const originalText = buttonEl.textContent;
 
-  if (!confirm(`Mark ${candidateName} as "Shortlisted" in BambooHR? This updates their real application status.`)) {
+  if (!confirm(`Mark ${candidateName} as "${label}" in BambooHR? This updates their real application status.`)) {
     return;
   }
 
@@ -636,10 +681,11 @@ async function shortlistCandidate(applicationId, candidateName, buttonEl) {
   statusEl.className = 'shortlist-status';
 
   try {
-    const { list, match } = await getShortlistStatus(workerUrl, domain, apikey);
+    const list = await getAllStatuses(workerUrl, domain, apikey);
+    const match = list.find(s => String(s.name || s.label || '').toLowerCase().includes(keyword));
     if (!match) {
       const names = list.map(s => s.name || s.label).filter(Boolean).join(', ');
-      throw new Error(`No status containing "Shortlist" was found. Available statuses: ${names || '(none returned)'}`);
+      throw new Error(`No status containing "${keyword}" was found. Available statuses: ${names || '(none returned)'}`);
     }
 
     const res = await fetch(`${workerUrl}/bamboohr/applications/${applicationId}/status`, {
@@ -657,12 +703,12 @@ async function shortlistCandidate(applicationId, candidateName, buttonEl) {
       throw new Error(body);
     }
 
-    buttonEl.textContent = '✓ Shortlisted';
+    buttonEl.textContent = `✓ ${label}`;
     statusEl.textContent = `Status updated to "${match.name || match.label}"`;
     statusEl.className = 'shortlist-status ok';
   } catch (e) {
     buttonEl.disabled = false;
-    buttonEl.textContent = 'Mark as Shortlisted';
+    buttonEl.textContent = originalText;
     statusEl.textContent = `Failed: ${e.message}`;
     statusEl.className = 'shortlist-status err';
   }
