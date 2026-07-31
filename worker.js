@@ -310,7 +310,7 @@ CANDIDATES:`,
 
   for (const c of batch) {
     parts.push({
-      text: `\n--- CANDIDATE ${c.id} (${c.name}) ---\n${c.text || "(no screening-question or note text available)"}${c.resumePdfBase64 ? "\nTheir resume PDF is attached below." : ""}`,
+      text: `\n=== Candidate record ===\nCANDIDATE_ID: ${c.id}\nName: ${c.name}\n${c.text || "(no screening-question or note text available)"}${c.resumePdfBase64 ? "\nTheir resume PDF is attached below." : ""}`,
     });
     if (c.resumePdfBase64) {
       parts.push({
@@ -321,7 +321,7 @@ CANDIDATES:`,
 
   parts.push({
     text: `\nRespond with ONLY a JSON array, no other text, no markdown fences. Each element:
-{"id": "<candidate id exactly as given>", "score": <integer 0-100>, "rationale": "<1-2 sentence explanation citing specific matches or gaps>"}`,
+{"id": "<the exact value that followed CANDIDATE_ID: for this candidate — nothing else, no extra words>", "score": <integer 0-100>, "rationale": "<1-2 sentence explanation citing specific matches or gaps>"}`,
   });
 
   return parts;
