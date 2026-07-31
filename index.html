@@ -611,12 +611,14 @@ function renderResults(results, candidates, domain, totalNew) {
   $('resultsList').innerHTML = results.map((r, i) => {
     const cand = byId[r.id] || { name: `Applicant ${r.id}` };
     const safeName = escapeHtml(cand.name).replace(/'/g, "\\'");
+    const link = `https://${domain}.bamboohr.com/hiring/candidates/${r.id}?list_type=jobs#ats-info`;
     return `
       <div class="rank-card">
         <div class="rank-num">${String(i + 1).padStart(2, '0')}</div>
         <div>
           <p class="cand-name">${escapeHtml(cand.name)}</p>
           <p class="cand-rationale">${escapeHtml(r.rationale || '')}</p>
+          <p class="cand-link"><a href="${link}" target="_blank" rel="noopener">Open profile in BambooHR →</a></p>
           <div class="action-row">
             <button class="shortlist-btn" onclick="updateCandidateStatus('${r.id}', '${safeName}', 'shortlist', this)">Mark as Shortlisted</button>
             <button class="reviewed-btn" onclick="updateCandidateStatus('${r.id}', '${safeName}', 'reviewed', this)">Mark as Reviewed</button>
